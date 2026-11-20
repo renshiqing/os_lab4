@@ -1,81 +1,715 @@
 #ifndef __KERN_MM_MMU_H__
 #define __KERN_MM_MMU_H__
 
+/*
+ * ============================================================
+ * 1. MMU 相关基础定义
+ * ============================================================
+ *
+ * MMU（Memory Management Unit，内存管理单元）负责将 CPU
+ * 使用的虚拟地址（Virtual Address，VA）转换为物理地址
+ * （Physical Address，PA）。
+ *
+ * 本实验使用 RISC-V Sv39 分页模式：
+ *
+ * - 虚拟地址有效位宽：39 位
+ * - 页表采用三级页表结构
+ * - 每一级页表包含 512 个页表项
+ * - 每个页表项占 8 字节（64 bit）
+ * - 页面大小为 4 KiB
+ *
+ * Sv39 虚拟地址的结构：
+ *
+ *  63          39 38    30 29    21 20    12 11       0
+ * +--------------+--------+--------+--------+----------+
+ * | Sign Extension| PDX1  |  PDX0  |  PTX   |  PGOFF   |
+ * +--------------+--------+--------+--------+----------+
+ *                  9 bits  9 bits   9 bits   12 bits
+ *
+ * 其中：
+ * PDX1  ：一级页目录索引（VPN[2]）
+ * PDX0  ：二级页目录索引（VPN[1]）
+ * PTX   ：三级页表索引（VPN[0]）
+ * PGOFF ：页内偏移
+ *
+ * Sv39 要求虚拟地址的第 63~39 位是第 38 位的符号扩展。
+ *
+ */
+
 #ifndef __ASSEMBLER__
 #include <defs.h>
 #endif /* !__ASSEMBLER__ */
 
-// A linear address 'la' has a three-part structure as follows:
-//
-// +--------10------+-------10-------+---------12----------+
-// | Page Directory |   Page Table   | Offset within Page  |
-// |      Index     |     Index      |                     |
-// +----------------+----------------+---------------------+
-//  \--- PDX(la) --/ \--- PTX(la) --/ \---- PGOFF(la) ----/
-//  \----------- PPN(la) -----------/
-//
-// The PDX, PTX, PGOFF, and PPN macros decompose linear addresses as shown.
-// To construct a linear address la from PDX(la), PTX(la), and PGOFF(la),
-// use PGADDR(PDX(la), PTX(la), PGOFF(la)).
 
-// RISC-V uses 32-bit virtual address to access 34-bit physical address!
-// Sv32 page table entry:
-// +---------12----------+--------10-------+---2----+-------8-------+
-// |       PPN[1]        |      PPN[0]     |Reserved|D|A|G|U|X|W|R|V|
-// +---------12----------+-----------------+--------+---------------+
+/*
+ * ============================================================
+ * 2. 虚拟地址拆分与页表索引计算
+ * ============================================================
+ *
+ * 一个 Sv39 虚拟地址可以拆分为三个页表索引和一个页内偏移：
+ *
+ *           三级页表结构
+ *
+ *              虚拟地址
+ *                  |
+ *          +-------+-------+
+ *          |               |
+ *         PDX1             |
+ *          |               |
+ *     一级页目录           |
+ *          |               |
+ *         PDX0             |
+ *          |               |
+ *     二级页目录           |
+ *          |               |
+ *          PTX             |
+ *          |               |
+ *       三级页表           |
+ *          |               |
+ *       物理页号           |
+ *          |               |
+ *        PGOFF             |
+ *          |               |
+ *          +-------+-------+
+ *                  |
+ *              物理地址
+ *
+ * 每一级索引均为 9 位，因此可以表示 512 个页表项。
+ */
 
-// page directory index
+
+/*
+ * PDX1(la)
+ *
+ * 获取虚拟地址 la 的第一级页目录索引。
+ *
+ * Sv39 中 PDX1 对应虚拟地址的 bit[38:30]。
+ *
+ * 计算过程：
+ * 1. la 右移 30 位，将 bit[38:30] 移动到最低位。
+ * 2. 与 0x1FF（二进制 9 个 1）进行按位与。
+ * 3. 保留最低 9 位，得到一级页目录索引。
+ *
+ * 0x1FF = 511 = 2^9 - 1
+ */
 #define PDX1(la) ((((uintptr_t)(la)) >> PDX1SHIFT) & 0x1FF)
+
+
+/*
+ * PDX0(la)
+ *
+ * 获取虚拟地址 la 的第二级页目录索引。
+ *
+ * 对应虚拟地址 bit[29:21]。
+ *
+ * 计算过程：
+ * 1. 右移 21 位。
+ * 2. 使用 0x1FF 屏蔽其他位。
+ * 3. 得到第二级页目录索引。
+ */
 #define PDX0(la) ((((uintptr_t)(la)) >> PDX0SHIFT) & 0x1FF)
 
-// page table index
+
+/*
+ * PTX(la)
+ *
+ * 获取虚拟地址 la 的第三级页表索引。
+ *
+ * 对应虚拟地址 bit[20:12]。
+ *
+ * 计算过程：
+ * 1. 右移 12 位。
+ * 2. 使用 0x1FF 屏蔽其他位。
+ * 3. 得到三级页表索引。
+ */
 #define PTX(la) ((((uintptr_t)(la)) >> PTXSHIFT) & 0x1FF)
 
-// page number field of address
+
+/*
+ * PPN(la)
+ *
+ * 获取地址 la 对应的页号（Page Number）。
+ *
+ * 计算方式：
+ *
+ *     PPN = la / 4096 = la >> 12
+ *
+ * 也就是说，去掉地址最低的 12 位页内偏移，
+ * 剩余部分就是页面编号。
+ *
+ * 注意：
+ * 这里的 PPN 是对地址进行计算得到的页号，
+ * 不等同于直接读取页表项中的 PPN 字段。
+ */
 #define PPN(la) (((uintptr_t)(la)) >> PTXSHIFT)
 
-// offset in page
+
+/*
+ * PGOFF(la)
+ *
+ * 获取地址 la 在当前 4 KiB 页面内部的偏移量。
+ *
+ * 页面大小：
+ *
+ *     PGSIZE = 4096 = 2^12
+ *
+ * 因此页内偏移由最低 12 位决定。
+ *
+ * 使用 0xFFF（二进制最低 12 位为 1）
+ * 保留地址的 bit[11:0]。
+ *
+ * 结果范围：
+ *     0 ~ 4095
+ */
 #define PGOFF(la) (((uintptr_t)(la)) & 0xFFF)
 
-// construct linear address from indexes and offset
-#define PGADDR(d1, d0, t, o) ((uintptr_t)((d1) << PDX1SHIFT |(d0) << PDX0SHIFT | (t) << PTXSHIFT | (o)))
 
-// address in page table or page directory entry
-#define PTE_ADDR(pte)   (((uintptr_t)(pte) & ~0x3FF) << (PTXSHIFT - PTE_PPN_SHIFT))
+/*
+ * PGADDR(d1, d0, t, o)
+ *
+ * 根据三个页表索引和页内偏移，重新构造虚拟地址。
+ *
+ * 参数：
+ * d1：一级页目录索引，对应 bit[38:30]
+ * d0：二级页目录索引，对应 bit[29:21]
+ * t ：三级页表索引，对应 bit[20:12]
+ * o ：页内偏移，对应 bit[11:0]
+ *
+ * 构造过程：
+ *
+ * d1 << 30：将一级索引放入 bit[38:30]
+ * d0 << 21：将二级索引放入 bit[29:21]
+ * t  << 12：将三级索引放入 bit[20:12]
+ * o        ：保留页内偏移
+ *
+ * 最后使用按位或，将四部分组合成地址。
+ *
+ * 注意：该宏构造的是 Sv39 地址的 39 位有效部分，
+ * 对于高地址，还需要满足 Sv39 的符号扩展规范。
+ */
+#define PGADDR(d1, d0, t, o) \
+    ((uintptr_t)((d1) << PDX1SHIFT | \
+                 (d0) << PDX0SHIFT | \
+                 (t) << PTXSHIFT | (o)))
+
+
+/*
+ * ============================================================
+ * 3. 页表项中的物理地址提取
+ * ============================================================
+ *
+ * RISC-V Sv39 的页表项（PTE）为 64 位。
+ *
+ * PTE 的基本结构：
+ *
+ * 63          54 53                  10 9       8 7       0
+ * +-------------+----------------------+---------+---------+
+ * |   Reserved  |         PPN          |   RSW   | Flags   |
+ * +-------------+----------------------+---------+---------+
+ *
+ * bit[53:10]：物理页号 PPN
+ * bit[9:8]  ：软件保留位
+ * bit[7:0]  ：页表标志位
+ *
+ * PPN 字段左移 12 位，就可以还原对应的物理页地址。
+ */
+
+
+/*
+ * PTE_ADDR(pte)
+ *
+ * 从页表项中提取其指向的物理地址。
+ *
+ * 计算分为两步：
+ *
+ * 第一步：
+ *     pte & ~0x3FF
+ *
+ *     清除最低 10 位。
+ *     保留页表项中的 PPN 字段。
+ *
+ * 第二步：
+ *     << (PTXSHIFT - PTE_PPN_SHIFT)
+ *
+ *     PTE_PPN_SHIFT = 10
+ *     PTXSHIFT      = 12
+ *
+ *     因此左移 2 位。
+ *
+ * 最终：
+ *     PTE 中的 PPN 字段从 bit[53:10]
+ *     移动到物理地址的 bit[55:12]。
+ *
+ * 得到对应物理页面的起始地址。
+ *
+ * 注意：该宏适用于页表项指向下一级页表或普通
+ * 4 KiB 叶页的情况，不能直接用于任意格式的数据。
+ */
+#define PTE_ADDR(pte) \
+    (((uintptr_t)(pte) & ~0x3FF) << (PTXSHIFT - PTE_PPN_SHIFT))
+
+
+/*
+ * PDE_ADDR(pde)
+ *
+ * 提取页目录项所指向的下一级页表物理地址。
+ *
+ * 在本实验的 Sv39 页表结构中：
+ *
+ * 一级页目录项 -> 二级页目录
+ * 二级页目录项 -> 三级页表
+ *
+ * 非叶子页表项中的 PPN 指向下一级页表。
+ *
+ * PDE_ADDR 与 PTE_ADDR 使用相同的 PPN 提取方式，
+ * 因此这里直接复用 PTE_ADDR。
+ */
 #define PDE_ADDR(pde)   PTE_ADDR(pde)
 
-/* page directory and page table constants */
-#define NPDEENTRY       512                    // page directory entries per page directory
-#define NPTEENTRY       512                    // page table entries per page table
 
-#define PGSIZE          4096                    // bytes mapped by a page
-#define PGSHIFT         12                      // log2(PGSIZE)
-#define PTSIZE          (PGSIZE * NPTEENTRY)    // bytes mapped by a page directory entry
-#define PTSHIFT         21                      // log2(PTSIZE)
+/*
+ * ============================================================
+ * 4. 页表结构相关常量
+ * ============================================================
+ */
 
-#define PTXSHIFT        12                      // offset of PTX in a linear address
-#define PDX0SHIFT       21                      // offset of PDX in a linear address
-#define PDX1SHIFT		30
-#define PTE_PPN_SHIFT   10                      // offset of PPN in a physical address
 
-// page table entry (PTE) fields
-#define PTE_V     0x001 // Valid
-#define PTE_R     0x002 // Read
-#define PTE_W     0x004 // Write
-#define PTE_X     0x008 // Execute
-#define PTE_U     0x010 // User
-#define PTE_G     0x020 // Global
-#define PTE_A     0x040 // Accessed
-#define PTE_D     0x080 // Dirty
-#define PTE_SOFT  0x300 // Reserved for Software
+/*
+ * NPDEENTRY
+ *
+ * 每个页目录包含的页目录项数量。
+ *
+ * Sv39 每一级索引均为 9 位：
+ *
+ *     2^9 = 512
+ *
+ * 因此每个页目录包含 512 个表项。
+ */
+#define NPDEENTRY       512
 
+
+/*
+ * NPTEENTRY
+ *
+ * 每个页表包含的页表项数量。
+ *
+ * 同样因为索引宽度为 9 位：
+ *
+ *     2^9 = 512
+ *
+ * 因此一个三级页表包含 512 个 PTE。
+ */
+#define NPTEENTRY       512
+
+
+/*
+ * PGSIZE
+ *
+ * 页面大小（Page Size）。
+ *
+ * RISC-V Sv39 的基础页面大小为 4 KiB。
+ *
+ *     4 KiB = 4096 Bytes = 2^12 Bytes
+ *
+ * 因此：
+ * - 页面起始地址按 4096 字节对齐。
+ * - 页内偏移使用最低 12 位。
+ * - 分配和释放物理页时通常以 PGSIZE 为单位。
+ */
+#define PGSIZE          4096
+
+
+/*
+ * PGSHIFT
+ *
+ * 页面大小对应的二进制位数。
+ *
+ *     PGSIZE = 2^12
+ *
+ * 因此：
+ *     PGSHIFT = 12
+ *
+ * 用于地址右移、页号计算以及页面对齐。
+ */
+#define PGSHIFT         12
+
+
+/*
+ * PTSIZE
+ *
+ * 一个三级页表能够映射的虚拟地址空间大小。
+ *
+ * 一个三级页表包含：
+ *
+ *     NPTEENTRY = 512 个页表项
+ *
+ * 每个页表项对应：
+ *
+ *     PGSIZE = 4096 Bytes
+ *
+ * 所以：
+ *
+ *     PTSIZE = 512 * 4096
+ *            = 2097152 Bytes
+ *            = 2 MiB
+ *
+ * 即一个二级页目录项通过下一级三级页表，
+ * 能够覆盖 2 MiB 的虚拟地址空间。
+ */
+#define PTSIZE          (PGSIZE * NPTEENTRY)
+
+
+/*
+ * PTSHIFT
+ *
+ * PTSIZE 对应的二进制位数。
+ *
+ *     PTSIZE = 2 MiB = 2^21
+ *
+ * 因此：
+ *     PTSHIFT = 21
+ *
+ * 对应虚拟地址中的 bit[29:21] 索引位置。
+ */
+#define PTSHIFT         21
+
+
+/*
+ * ============================================================
+ * 5. 虚拟地址各字段的位移量
+ * ============================================================
+ *
+ * Sv39 虚拟地址有效位宽为 39 位。
+ *
+ * +--------+--------+--------+----------+
+ * | PDX1   | PDX0   | PTX    | PGOFF    |
+ * +--------+--------+--------+----------+
+ * | 9 bit  | 9 bit  | 9 bit  | 12 bit   |
+ * +--------+--------+--------+----------+
+ *
+ * 这些常量用于确定各字段在虚拟地址中的位置。
+ */
+
+
+/*
+ * PTXSHIFT
+ *
+ * 三级页表索引 PTX 的起始位。
+ *
+ * bit[20:12] 为 PTX。
+ *
+ * 右移 12 位即可将 PTX 移到最低位。
+ */
+#define PTXSHIFT        12
+
+
+/*
+ * PDX0SHIFT
+ *
+ * 二级页目录索引 PDX0 的起始位。
+ *
+ * bit[29:21] 为 PDX0。
+ *
+ * 右移 21 位即可提取该字段。
+ */
+#define PDX0SHIFT       21
+
+
+/*
+ * PDX1SHIFT
+ *
+ * 一级页目录索引 PDX1 的起始位。
+ *
+ * bit[38:30] 为 PDX1。
+ *
+ * 右移 30 位即可提取该字段。
+ */
+#define PDX1SHIFT       30
+
+
+/*
+ * PTE_PPN_SHIFT
+ *
+ * 页表项中 PPN 字段的起始位。
+ *
+ * RISC-V 页表项的 bit[9:0] 为标志位或软件保留位，
+ * PPN 从 bit[10] 开始。
+ *
+ * 因此：
+ *     PTE_PPN_SHIFT = 10
+ *
+ * 该常量主要用于 PTE_ADDR/PDE_ADDR 中的
+ * 物理地址还原计算。
+ */
+#define PTE_PPN_SHIFT   10
+
+
+/*
+ * ============================================================
+ * 6. 页表项 PTE 的标志位定义
+ * ============================================================
+ *
+ * PTE（Page Table Entry，页表项）用于描述：
+ *
+ * 1. 页面是否有效。
+ * 2. 页面是否允许读、写、执行。
+ * 3. 页面是否允许用户态访问。
+ * 4. 页面是否为全局映射。
+ * 5. 页面是否已经被访问或修改。
+ *
+ * 各标志位对应 PTE 的 bit[7:0]。
+ */
+
+
+/*
+ * PTE_V
+ *
+ * Valid：有效位。
+ *
+ * bit[0] = 1：页表项有效。
+ * bit[0] = 0：页表项无效。
+ *
+ * 页表遍历过程中，如果遇到 V=0，
+ * 表示当前映射不存在或不可用。
+ */
+#define PTE_V     0x001
+
+
+/*
+ * PTE_R
+ *
+ * Read：可读权限。
+ *
+ * bit[1] = 1：允许读取页面内容。
+ * bit[1] = 0：不具有读权限。
+ */
+#define PTE_R     0x002
+
+
+/*
+ * PTE_W
+ *
+ * Write：可写权限。
+ *
+ * bit[2] = 1：允许向页面写入数据。
+ * bit[2] = 0：不具有写权限。
+ *
+ * RISC-V 规定 W=1 而 R=0 的 PTE 组合无效。
+ */
+#define PTE_W     0x004
+
+
+/*
+ * PTE_X
+ *
+ * Execute：可执行权限。
+ *
+ * bit[3] = 1：允许从该页面取指执行。
+ * bit[3] = 0：不允许从该页面取指执行。
+ */
+#define PTE_X     0x008
+
+
+/*
+ * PTE_U
+ *
+ * User：用户态访问权限。
+ *
+ * bit[4] = 1：允许 U-mode 用户态访问该页面，
+ *            具体仍受 R/W/X 权限控制。
+ *
+ * bit[4] = 0：普通 U-mode 访问不能通过该页面映射。
+ *
+ * 内核页面通常不设置 PTE_U。
+ */
+#define PTE_U     0x010
+
+
+/*
+ * PTE_G
+ *
+ * Global：全局映射标志。
+ *
+ * bit[5] = 1：该映射具有全局属性。
+ *
+ * 全局映射在 TLB 地址空间标识及失效规则中
+ * 有特殊意义，常用于多个地址空间共享的映射。
+ */
+#define PTE_G     0x020
+
+
+/*
+ * PTE_A
+ *
+ * Accessed：访问标志位。
+ *
+ * bit[6] = 1：表示页面已经被访问。
+ *
+ * 硬件或软件可根据平台的 A/D 管理方式更新该位。
+ * 操作系统可以利用它进行页面访问情况统计。
+ */
+#define PTE_A     0x040
+
+
+/*
+ * PTE_D
+ *
+ * Dirty：脏页标志位。
+ *
+ * bit[7] = 1：表示页面已经发生写入。
+ *
+ * 操作系统可利用该位判断页面是否被修改，
+ * 例如辅助页面回写和页面置换管理。
+ */
+#define PTE_D     0x080
+
+
+/*
+ * PTE_SOFT
+ *
+ * Software Reserved：软件保留位。
+ *
+ * 对应 bit[9:8]。
+ *
+ * RISC-V 将这两位保留给操作系统软件使用。
+ * 可用于保存操作系统自定义的页面状态信息。
+ *
+ * 这两位不属于普通的 R/W/X/U 权限位。
+ */
+#define PTE_SOFT  0x300
+
+
+/*
+ * ============================================================
+ * 7. 常用页表项权限组合
+ * ============================================================
+ *
+ * 以下宏将前面定义的 PTE 标志位进行组合，
+ * 方便建立不同类型的页表映射。
+ *
+ * 注意：
+ * PAGE_TABLE_DIR 用于非叶子页表项；
+ * 其他权限组合通常用于叶子页表项。
+ */
+
+
+/*
+ * PAGE_TABLE_DIR
+ *
+ * 非叶子页表项的有效标志。
+ *
+ * 仅设置 PTE_V：
+ *
+ *     V = 1
+ *     R = 0
+ *     W = 0
+ *     X = 0
+ *
+ * 表示该页表项指向下一级页表，而不是直接映射普通数据页。
+ *
+ * 例如：
+ * 一级页目录项指向二级页目录；
+ * 二级页目录项指向三级页表。
+ */
 #define PAGE_TABLE_DIR (PTE_V)
+
+
+/*
+ * READ_ONLY
+ *
+ * 只读映射：
+ *
+ * R = 1
+ * W = 0
+ * X = 0
+ * V = 1
+ *
+ * 页面有效，允许读取，不允许写入和执行。
+ */
 #define READ_ONLY (PTE_R | PTE_V)
+
+
+/*
+ * READ_WRITE
+ *
+ * 读写映射：
+ *
+ * R = 1
+ * W = 1
+ * X = 0
+ * V = 1
+ *
+ * 页面有效，允许读取和写入，不允许执行。
+ */
 #define READ_WRITE (PTE_R | PTE_W | PTE_V)
+
+
+/*
+ * EXEC_ONLY
+ *
+ * 仅执行映射：
+ *
+ * R = 0
+ * W = 0
+ * X = 1
+ * V = 1
+ *
+ * 页面有效，只允许执行。
+ */
 #define EXEC_ONLY (PTE_X | PTE_V)
+
+
+/*
+ * READ_EXEC
+ *
+ * 读和执行映射：
+ *
+ * R = 1
+ * W = 0
+ * X = 1
+ * V = 1
+ *
+ * 常用于只读代码段。
+ */
 #define READ_EXEC (PTE_R | PTE_X | PTE_V)
+
+
+/*
+ * READ_WRITE_EXEC
+ *
+ * 读、写、执行映射：
+ *
+ * R = 1
+ * W = 1
+ * X = 1
+ * V = 1
+ *
+ * 页面具备全部三种访问权限。
+ */
 #define READ_WRITE_EXEC (PTE_R | PTE_W | PTE_X | PTE_V)
 
+
+/*
+ * PTE_USER
+ *
+ * 用户态页面权限组合：
+ *
+ * R = 1
+ * W = 1
+ * X = 1
+ * U = 1
+ * V = 1
+ *
+ * 表示页面有效，并设置用户态访问标志。
+ *
+ * 具体能够执行读、写还是取指操作，
+ * 仍然受到 R/W/X 权限位的共同约束。
+ *
+ * 注意：本宏不代表所有用户页面都必须同时具有
+ * 读、写、执行权限，实际使用时可以按需要选择权限。
+ */
 #define PTE_USER (PTE_R | PTE_W | PTE_X | PTE_U | PTE_V)
 
+
 #endif /* !__KERN_MM_MMU_H__ */
+
