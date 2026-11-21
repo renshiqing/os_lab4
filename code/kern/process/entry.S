@@ -1,7 +1,26 @@
-.text
-.globl kernel_thread_entry
-kernel_thread_entry:        # void kernel_thread(void)
-	move a0, s1
-	jalr s0
+//kernel_thread_entry 负责执行新创建的内核线程：
+//1. 从 s1 中取出线程参数，传递给实际执行函数。
+//2. 从 s0 中取得函数入口地址，调用内核线程函数。
+//3. 等待线程函数执行结束。
+//4. 调用 do_exit，结束当前线程并交由内核进行后续处理。
 
-	jal do_exit
+.text                             # 指定后续代码存放在程序的代码段（.text）中
+
+.globl kernel_thread_entry        # 将 kernel_thread_entry 声明为全局符号，允许其他文件调用
+
+kernel_thread_entry:              # 定义内核线程的执行入口
+                                  # 新创建的内核线程首次运行时，从这里开始执行
+
+    move a0, s1                   # 将 s1 中保存的线程参数 arg 传递给 a0
+                                  # 根据 RISC-V 函数调用约定，a0 是第一个函数参数寄存器
+                                  # 因此，相当于准备调用 fn(arg)
+
+    jalr s0                       # 跳转到 s0 保存的函数地址，执行内核线程的实际任务函数 fn
+                                  # s0 中保存的是内核线程函数的入口地址
+                                  # jalr 会将返回地址保存到 ra 寄存器
+                                  # 当 fn 执行结束后，程序返回到下一条指令
+                                  # 函数返回值保存在 a0 中
+
+    jal do_exit                   # 调用 do_exit，结束当前内核线程
+                                  # 此时 a0 保存线程函数 fn 的返回值，将其作为退出码传递给 do_exit
+                                  # do_exit 负责处理线程退出及后续调度，正常情况下不会返回
