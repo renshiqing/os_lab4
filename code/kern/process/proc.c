@@ -84,21 +84,35 @@
  */
 
 // the process set's list；中文说明：全局进程链表头；普通新建线程会通过 list_link 接入该链表，调度器可遍历它寻找可运行线程。
+
+
 list_entry_t proc_list; // 定义全局进程链表的哨兵节点；list_init 后该链表为空的循环链表。
+//所有进程控制块的双向线性列表，proc_struct中的成员变量list_link将链接入这个链表中
+
 
 #define HASH_SHIFT 10 // PID 哈希函数使用的移位位数，决定哈希桶数量为 2 的 HASH_SHIFT 次方。
 #define HASH_LIST_SIZE (1 << HASH_SHIFT) // PID 哈希桶总数；这里为 2^10，即 1024 个桶。
 #define pid_hashfn(x) (hash32(x, HASH_SHIFT)) // 把 PID 映射到哈希桶下标；hash32 将 PID 哈希为 HASH_SHIFT 位索引。
 
-// has list for process set based on pid；中文说明：原有说明注释，保留其内容并补充中文解释。
-static list_entry_t hash_list[HASH_LIST_SIZE]; // 静态 PID 哈希桶数组；每个桶是一个链表头，保存哈希值相同的进程节点。
 
-// idle proc；中文说明：原有说明注释，保留其内容并补充中文解释。
+
+
+static list_entry_t hash_list[HASH_LIST_SIZE]; // 静态 PID 哈希桶数组；每个桶是一个链表头，保存哈希值相同的进程节点。
+//所有进程控制块的哈希表，proc_struct中的成员变量hash_link将基于pid链接入这个哈希表中
+
+
+
 struct proc_struct *idleproc = NULL; // idleproc 指向空闲线程 PCB；当没有其他可运行线程时，CPU 仍由它执行。
 // init proc；中文说明：原有说明注释，保留其内容并补充中文解释。
+
+
 struct proc_struct *initproc = NULL; // initproc 指向系统初始化后创建的第一个普通内核线程，Lab4 中负责打印测试字符串。
-// current proc；中文说明：原有说明注释，保留其内容并补充中文解释。
+// 本实验中，指向一个内核线程。本实验以后，此指针将指向第一个用户态进程。
+
+
 struct proc_struct *current = NULL; // current 指向当前正在 CPU 上执行的进程/线程 PCB，是进程管理代码最常用的全局状态。
+//当前占用CPU且处于“运行”状态进程控制块指针。通常这个变量是只读的，只有在进程切换的时候才进行修改，并且整个切换和修改过程需要保证操作的原子性，目前至少需要屏蔽中断。可以参考 switch_to 的实现。
+
 
 static int nr_process = 0; // 记录系统当前已经登记的进程/线程数量；创建成功时增加，资源回收时应相应减少。
 
