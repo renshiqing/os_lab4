@@ -43,15 +43,35 @@ extern list_entry_t proc_list; // 全局进程链表头；已登记的进程/线
 struct proc_struct // 进程控制块（PCB）：内核用它记录一个进程/内核线程的状态和运行资源。
 {
     enum proc_state state;        // 当前生命周期状态；调度器根据它判断该执行实体是否可以运行。
+                                  //uCore中进程状态有四种：分别是PROC_UNINIT、PROC_SLEEPING、PROC_RUNNABLE、PROC_ZOMBIE。
+
     int pid;                      // Process ID，进程/线程标识号；idleproc 通常固定为 0。
     int runs;                     // 该进程被调度运行的次数，可用于统计或调度策略。
+
     uintptr_t kstack;             // 内核栈的内核虚拟地址基址；陷入内核和线程切换时使用。
+//kstack记录了分配给该进程/线程的内核栈的位置。主要作用有以下几点。
+//首先，当内核准备从一个进程切换到另一个的时候，需要根据kstack 的值正确的设置好 tss ，以便在进程切换以后再发生中断时能够使用正确的栈。
+//当 CPU 从用户态切换到内核态时，可以通过 TSS 自动获取当前任务对应的内核栈，确保中断和异常处理能够使用正确的内核栈。操作系统在进程切换时，需要更新 TSS 中的内核栈指针。
+//其次，内核栈位于内核地址空间，并且是不共享的（每个线程都拥有自己的内核栈），因此不受到 mm 的管理，当进程退出的时候，内核能够根据 kstack 的值快速定位栈的位置并进行回收。
+
+
+
+
     volatile bool need_resched;   // 非零表示当前执行实体应尽快让出 CPU 并触发重新调度。
+
     struct proc_struct *parent;   // 父进程 PCB 指针；新建线程通常将创建者 current 记录为 parent。
-    struct mm_struct *mm;         // 用户虚拟地址空间管理结构；Lab4 的内核线程共享内核地址空间，通常为 NULL。
+                                  //里面保存了进程的父进程的指针。在内核中，只有内核创建的idle进程没有父进程，其他进程都有父进程。进程的父子关系组成了一棵进程树，这种父子关系有利于维护父进程对于子进程的一些特殊操作。
+
+    struct mm_struct *mm;         // 用户虚拟地址空间管理结构；Lab4 的内核线程共享内核地址空间，通常为 NULL。这里面保存了内存管理的信息，包括内存映射，虚存管理等内容。
+
     struct context context;       // 线程切换上下文；switch_to 保存旧线程并恢复新线程时使用。
+                                  //context中保存了进程执行的上下文，也就是几个关键的寄存器的值。这些寄存器的值用于在进程切换中还原之前进程的运行状态（进程切换的详细过程在后面会介绍）。切换过程的实现在kern/process/switch.S。
+
     struct trapframe *tf;         // 中断帧指针；保存通用寄存器、状态寄存器和异常返回地址等完整现场。
+
     uintptr_t pgdir;              // 根页表的物理地址；切换线程时将其页号写入 satp 以选择地址空间。
+                                  //即页目录（Page Directory）的基址。在 RISC-V 架构中，CPU 通过 satp 寄存器找到当前页表的根节点，从而进行地址翻译。pgdir 字段保存的就是每个进程的页表根节点的物理地址。当进行进程切换时，内核需要将下一个要运行进程的 pgdir 值加载到 satp 寄存器中，这样才能正确地切换到新的地址空间。
+
     uint32_t flags;               // 进程标志位；用于记录退出等状态属性，具体含义由相关宏定义。
     char name[PROC_NAME_LEN + 1]; // 进程名称缓冲区；最多 15 个有效字符，最后一个字节用于字符串结束符。
     list_entry_t list_link;       // 普通进程链表节点；将 PCB 挂入全局 proc_list。
