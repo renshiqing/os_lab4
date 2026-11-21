@@ -228,6 +228,11 @@ void pmm_init(void) // 初始化整个物理内存管理子系统。
     kmalloc_init(); // 初始化内核动态内存分配器，使 kmalloc/kfree 可以使用物理页管理能力。
 }
 
+
+
+
+
+
 // get_pte - get pte and return the kernel virtual address of this pte for la；根据虚拟地址获取对应的 PTE 指针；必要时创建中间级页表。
 //        - if the PT contians this pte didn't exist, alloc a page for PT；若所需的中间页表不存在且 create 为真，则申请物理页作为页表。
 // parameter:；参数说明如下。
@@ -265,6 +270,28 @@ pte_t *get_pte(pde_t *pgdir, uintptr_t la, bool create) // 沿 Sv39 三级页表
     }
     return &((pte_t *)KADDR(PDE_ADDR(*pdep0)))[PTX(la)]; // 提取三级页表地址，再以 PTX(la) 作为索引，返回最终叶子 PTE 的地址。
 }
+/*
+4. 为什么不同层级可以使用几乎相同的代码？
+因为 RISC-V 的多级页表有一个重要特点：
+
+每一级页表本质上都是由多个页表项组成的页面，非叶子页表项指向下一级页表。
+
+因此，不论当前处理的是第一级、第二级还是第三级页表，创建下一级页表的过程基本相同：
+1. 检查当前页表项的有效位。
+2. 如果无效，分配一个物理页。
+3. 设置物理页引用计数。
+4. 将新页面清零。
+5. 将新页面的物理页号写入当前页表项。
+变化的主要是：
+- 当前页表项的索引。
+- 当前页表项所在的层级。
+- 需要继续创建的下一级页表。
+所以，这种代码结构具有很好的可复用性。也可以进一步改写成循环或递归形式，根据页表层数统一处理，而不是重复编写多个代码块。
+*/
+
+
+
+
 
 // get_page - get related Page struct for linear address la using PDT pgdir；根据虚拟地址获取其映射的物理页面描述符。
 struct Page *get_page(pde_t *pgdir, uintptr_t la, pte_t **ptep_store) // pgdir 是根页表，la 是虚拟地址，ptep_store 可选地接收 PTE 指针。
@@ -280,6 +307,13 @@ struct Page *get_page(pde_t *pgdir, uintptr_t la, pte_t **ptep_store) // pgdir �
     }
     return NULL; // 没有有效映射时返回 NULL。
 }
+
+
+
+
+
+
+
 
 //LAB4 function1 2412396；Lab4 核心：删除一个虚拟地址对应的页表映射，并维护页面引用计数。
 static void page_remove_pte(pde_t *pgdir, uintptr_t la, pte_t *ptep) // pgdir 是根页表，la 是待解除映射的虚拟地址，ptep 是对应 PTE 指针。
@@ -298,6 +332,11 @@ void page_remove(pde_t *pgdir, uintptr_t la) // 对外提供按虚拟地址删�
     pte_t *ptep = get_pte(pgdir, la, 0); // 只查询已有页表，不因为删除操作而创建新的页表。
     if (ptep != NULL) page_remove_pte(pgdir, la, ptep); // 若找到 PTE，就调用内部函数完成清表、TLB 失效和引用计数维护。
 }
+
+
+
+
+
 
 int page_insert(pde_t *pgdir, struct Page *page, uintptr_t la, uint32_t perm) // Lab4 核心：将一个物理页面映射到指定虚拟地址，并设置访问权限。
 {
