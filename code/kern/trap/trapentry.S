@@ -109,8 +109,16 @@ __trapret:
     # go back from supervisor call
     sret
  
-    .globl forkrets
-forkrets:
-    # set stack to this new process's trapframe
-    move sp, a0
-    j __trapret
+
+//forkrets 是新进程首次被调度执行时使用的入口。它将栈指针设置为新进程的中断帧地址，然后跳转到 __trapret，利用统一的中断返回机制恢复进程的执行环境。
+    .globl forkrets                   # 将 forkrets 声明为全局符号，使其他文件可以引用该入口
+forkrets:                         # 定义 forkrets 标签，作为新进程首次切换后的执行入口
+
+    # 将当前栈切换到新进程的中断帧所在位置
+    move sp, a0                   # 将 a0 中保存的 trapframe 地址赋值给栈指针 sp
+                                  # a0 是函数参数寄存器，传入的是新进程的中断帧地址
+                                  # 此后，内核栈指针 sp 指向该进程的 trapframe
+
+    j __trapret                   # 无条件跳转到 __trapret 中断返回入口
+                                  # __trapret 根据 trapframe 恢复进程的寄存器状态
+                                  # 随后通过 sret 指令从内核态返回到相应的执行状态
